@@ -16,6 +16,12 @@ class SignalGenerator:
         self.adc_bits = 4
         self.adc_vref = 10.0
 
+        # Estado del muestreo del ADC entre bloques: muestras procesadas,
+        # índice de la última muestra ADC y valor retenido.
+        self._adc_n = 0
+        self._adc_k = -1
+        self._adc_hold = 0.0
+
 
     def apply_adc(self, signal, t):
         if not self.adc_enabled:
@@ -28,22 +34,28 @@ class SignalGenerator:
             return signal
 
         # -----------------------------
-        # 1️⃣ MUESTREO
+        # 1️⃣ MUESTREO (muestreo y retención, continuo entre bloques)
         # -----------------------------
         dt = t[1] - t[0]
         fs_signal = 1.0 / dt
 
-        step = int(fs_signal / fs_adc)
-        if step < 1:
-            step = 1
+        # Índice de la muestra ADC vigente en cada punto, contando desde el
+        # arranque: así el ritmo es exacto (3000 Hz son 3000 Hz) y no se
+        # reinicia al empezar cada bloque.
+        n = np.arange(len(signal))
+        k = np.floor((self._adc_n + n) * fs_adc / fs_signal)
+        nueva = np.empty(len(signal), dtype=bool)
+        nueva[0] = k[0] != self._adc_k
+        nueva[1:] = k[1:] != k[:-1]
 
-        sampled = np.zeros_like(signal)
+        # Cada punto toma el valor de la última muestra nueva; los primeros
+        # puntos del bloque, si no hay muestra nueva, mantienen el valor retenido.
+        ultima = np.maximum.accumulate(np.where(nueva, n, -1))
+        sampled = np.where(ultima >= 0, signal[np.maximum(ultima, 0)], self._adc_hold)
 
-        last_value = signal[0]
-        for i in range(len(signal)):
-            if i % step == 0:
-                last_value = signal[i]  # nueva muestra
-            sampled[i] = last_value     # hold
+        self._adc_n += len(signal)
+        self._adc_k = k[-1]
+        self._adc_hold = sampled[-1]
 
         # -----------------------------
         # 2️⃣ CUANTIFICACIÓN ADC CON VREF
@@ -60,11 +72,10 @@ class SignalGenerator:
         # Cuantificador tipo ADC real (mid-rise)
         q_step = (2 * vref) / levels
 
-        quantized = (
-            np.floor((sampled + vref) / q_step) * q_step
-            - vref
-            + q_step/2
-        )
+        # El código máximo es levels-1: con la entrada en +Vref la salida
+        # no puede pasar de Vref.
+        codigo = np.clip(np.floor((sampled + vref) / q_step), 0, levels - 1)
+        quantized = codigo * q_step - vref + q_step/2
         return quantized
     
     
@@ -98,16 +109,19 @@ class SignalGenerator:
                 self.phases_fm = block_phases[-1] % (2 * np.pi)
                 res = self.channels["CH1"]["amp"] * np.sin(block_phases) + self.channels["CH1"]["offset"]
             else:
-                res = c_ac * (m_raw / (amp2 if amp2 != 0 else 1.0)) # DBL
-            
+                # DBL: producto de las partes alternas (sin portadora)
+                m_ac_norm = (m_raw - self.channels["CH2"]["offset"]) / (amp2 if amp2 != 0 else 1.0)
+                res = c_ac * m_ac_norm + self.channels["CH1"]["offset"]
+
             adc_out = self.apply_adc(res + cfg3["offset"], t)
+
+            # El tiempo global avanza una vez por ciclo, DESPUÉS del último canal
+            # (CH3). Si avanzase antes, el mezclador calcularía el bloque
+            # siguiente y CH3 saldría desfasado respecto a CH1 y CH2.
+            self.total_time += len(t) * (t[1] - t[0])
             return adc_out
 
-        # Solo actualizamos el tiempo global una vez por ciclo (ej. al procesar CH2)
-        res = self._generate_base(ch, t, is_mixer_call=False)
-        if ch == "CH2":
-            self.total_time += len(t) * (t[1] - t[0])
-        return res
+        return self._generate_base(ch, t, is_mixer_call=False)
 
     def _generate_base(self, ch_key, t, is_mixer_call=False):
         cfg = self.channels[ch_key]

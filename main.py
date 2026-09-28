@@ -10,26 +10,12 @@ import datetime
 from tkinter import filedialog
 
 from signal_generator import SignalGenerator
-from oscilloscope import Oscilloscope
-from scope_plot import tek_scope_plot
+from oscilloscope import Oscilloscope, SPEC_SUELO_DB
+from scope_plot import tek_scope_plot, tek_scope_blit
 from digital_filters import apply_filter, filter_frequency_response
 from signal_utils import safe_get, safe_int, safe_float
 from gui_utils import resource_path
-
-
-import sys
-import os
-
-def resource_path(relative_path):
-    """
-    Devuelve la ruta correcta tanto en modo .py como en .exe (PyInstaller)
-    """
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-
-    return os.path.join(base_path, relative_path)
+import time
 
 
 # ==================================================
@@ -46,6 +32,9 @@ generator = SignalGenerator()
 
 scope = Oscilloscope(fs=200_000, buffer_seconds=1.0)
 scope.channels["CH3"]["enabled"] = False
+
+# Frecuencia máxima del generador: 90 % de Nyquist (fs/2) de la simulación
+FREQ_MAX_HZ = 0.45 * scope.fs
 
 last_gen_state = None
 
@@ -108,7 +97,7 @@ mod_type = tk.StringVar(value="SUM")   # SUM/ AM / DBL / FM
 mu_kf = tk.DoubleVar(value=0.5)       # μ (AM, DBL) o kf (FM)
 
 # ==============================
-# DAC (CH3) – GUI
+# ADC (CH3) – GUI
 # ==============================
 freq_sample = tk.IntVar(value=20000) # Frecuencia muestreo
 bits_res = tk.IntVar(value=4)       # Bits de resolucion
@@ -118,7 +107,7 @@ vref_var = tk.DoubleVar(value=10.0) # Tensión de referencia.
 # ==============================
 # Filtros (CH3) – GUI
 # ==============================
-filters = tk.StringVar(value="Paso Bajo")  # "Paso Bajo", "Paso Álto", "Pasa Banda", "Rechaza Banda"]
+filters = tk.StringVar(value="Paso Bajo")  # "Paso Bajo", "Paso Alto", "Pasa Banda", "Rechaza Banda"
 freq_filtro = tk.DoubleVar(value=1000)
 orden = tk.IntVar(value=1) 
 Ancho_Banda = tk.DoubleVar(value=1000)
@@ -141,7 +130,8 @@ for i, h in enumerate(headers):
 tk.Label(frame_gen, text="CH1").grid(row=2, column=0)
 tk.OptionMenu(frame_gen, wave1, *waves).grid(row=2, column=1, sticky="ew")
 tk.Entry(frame_gen, textvariable=amp1, width=8).grid(row=2, column=2)
-tk.Entry(frame_gen, textvariable=freq1, width=8).grid(row=2, column=3)
+entry_freq1 = tk.Entry(frame_gen, textvariable=freq1, width=8)
+entry_freq1.grid(row=2, column=3)
 tk.Entry(frame_gen, textvariable=phase1, width=8).grid(row=2, column=4)
 tk.Entry(frame_gen, textvariable=duty1, width=8).grid(row=2, column=5)
 tk.Entry(frame_gen, textvariable=offset1, width=8).grid(row=2, column=6)
@@ -150,10 +140,15 @@ tk.Entry(frame_gen, textvariable=offset1, width=8).grid(row=2, column=6)
 tk.Label(frame_gen, text="CH2").grid(row=3, column=0)
 tk.OptionMenu(frame_gen, wave2, *waves).grid(row=3, column=1, sticky="ew")
 tk.Entry(frame_gen, textvariable=amp2, width=8).grid(row=3, column=2)
-tk.Entry(frame_gen, textvariable=freq2, width=8).grid(row=3, column=3)
+entry_freq2 = tk.Entry(frame_gen, textvariable=freq2, width=8)
+entry_freq2.grid(row=3, column=3)
 tk.Entry(frame_gen, textvariable=phase2, width=8).grid(row=3, column=4)
 tk.Entry(frame_gen, textvariable=duty2, width=8).grid(row=3, column=5)
 tk.Entry(frame_gen, textvariable=offset2, width=8).grid(row=3, column=6)
+
+# Aviso cuando una frecuencia supera lo que la simulación puede representar
+aviso_freq = tk.Label(frame_gen, text="", fg="#c00000", justify="left")
+aviso_freq.grid(row=4, column=0, columnspan=7, sticky="w", padx=5, pady=(4, 0))
 
 
 # ==================================================
@@ -186,7 +181,7 @@ tk.Entry(
 
 tk.Label(
     frame_mixer,
-    text="CH1 = Portadora | CH2 = Moduladora\nParámetro = μ (AM/DBL) o kf (escala x1000) (FM)",
+    text="CH1 = Portadora | CH2 = Moduladora\nParámetro = μ (AM) o kf (escala x1000) (FM)",
     justify="left"
 ).grid(row=3, column=0, columnspan=3, sticky="w", padx=5, pady=(6, 0))
 
@@ -197,7 +192,7 @@ tk.Label(
 
 tk.Label(frame_adc, text="CONVERSOR ANALÓGICO/DIGITAL", font=("Arial", 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
-tk.Label(frame_adc, text="Fruencia muestro").grid(row=1, column=0, sticky="w", padx=5)
+tk.Label(frame_adc, text="Frecuencia muestreo").grid(row=1, column=0, sticky="w", padx=5)
 tk.Label(frame_adc, text="Vref ADC (±V)").grid(row=2, column=0, sticky="w", padx=5)
 tk.Label(frame_adc, text="Bit cuantificacion (max 24)").grid(row=3, column=0, sticky="w", padx=5)
 tk.Label(frame_adc, text="Activar ADC en (CH3)").grid(row=4, column=0, sticky="w", padx=5)
@@ -220,9 +215,9 @@ tk.Label(frame_filtros, text="Frecuencia corte/res.").grid(row=2, column=0, stic
 tk.Label(frame_filtros, text="Orden").grid(row=3, column=0, sticky="w", padx=5)
 tk.Label(frame_filtros, text="Ancho Banda").grid(row=4, column=0, sticky="w", padx=5)
 tk.Label(frame_filtros, text="Activar Filtro en (CH3)").grid(row=5, column=0, sticky="w", padx=5)
-tk.Label(frame_filtros, text="Mostra filtro en espectro").grid(row=6, column=0, sticky="w", padx=5)
+tk.Label(frame_filtros, text="Mostrar filtro en espectro").grid(row=6, column=0, sticky="w", padx=5)
 
-tk.OptionMenu(frame_filtros,filters,"Paso Bajo", "Paso Álto", "Pasa Banda", "Rechaza Banda").grid(row=1, column=1, sticky="ew", padx=5)
+tk.OptionMenu(frame_filtros,filters,"Paso Bajo", "Paso Alto", "Pasa Banda", "Rechaza Banda").grid(row=1, column=1, sticky="ew", padx=5)
 tk.Entry(frame_filtros, textvariable=freq_filtro, width=8).grid(row=2, column=1, sticky="w", padx=5)
 tk.Entry(frame_filtros, textvariable=orden, width=8).grid(row=3, column=1, sticky="w", padx=5)
 tk.Entry(frame_filtros, textvariable=Ancho_Banda, width=8).grid(row=4, column=1, sticky="w", padx=5)
@@ -272,7 +267,7 @@ frame_buttons.grid(row=1, column=1, sticky="ns")
 frame_buttons.configure(width=600)
 frame_buttons.grid_propagate(False)
 
-for i in range(4):
+for i in range(5):
     frame_buttons.rowconfigure(i, weight=1)
 for j in range(6):
     frame_buttons.columnconfigure(j, weight=0)
@@ -290,7 +285,17 @@ def update_channel_buttons():
             btn.config(bg="#303030",
                        fg="#aaaaaa", relief=tk.RAISED)
 
+_spectrum_buttons_state = None
+
 def update_spectrum_buttons():
+    # Se llama en cada fotograma: solo se tocan los botones si ha cambiado
+    # algo, porque reconfigurarlos obliga a Tk a redibujarlos.
+    global _spectrum_buttons_state
+    state = (scope.mode, scope.spec_channel)
+    if state == _spectrum_buttons_state:
+        return
+    _spectrum_buttons_state = state
+
     buttons = {
         "CH1": btn_spec_ch1,
         "CH2": btn_spec_ch2,
@@ -324,8 +329,40 @@ btn_master_dc = None
 btn_master_ac = None
 btn_master_gnd = None
 
+def limitar_frecuencias():
+    """
+    La simulación muestrea a scope.fs (200 kS/s): por encima de su límite de
+    Nyquist (fs/2) una frecuencia no se puede representar y aparece como otra
+    (aliasing; a 200 kHz exactos la senoidal vale 0 en todas las muestras).
+    Se limita a FREQ_MAX_HZ, algo por debajo de fs/2, y se avisa en la GUI.
+    El aliasing sigue pudiéndose estudiar con el ADC de CH3, que tiene su
+    propia frecuencia de muestreo.
+    """
+    resultado, avisos = [], []
+    for nombre, var, entry in (("CH1", freq1, entry_freq1), ("CH2", freq2, entry_freq2)):
+        f = safe_get(var, 0)
+        fuera = abs(f) > FREQ_MAX_HZ
+        color = "#ffb3b3" if fuera else "white"
+        if entry.cget("bg") != color:
+            entry.config(bg=color)
+        if fuera:
+            avisos.append(nombre)
+            f = FREQ_MAX_HZ if f > 0 else -FREQ_MAX_HZ
+        resultado.append(f)
+
+    texto = ""
+    if avisos:
+        texto = (f"{' y '.join(avisos)}: frecuencia limitada a {FREQ_MAX_HZ/1000:.0f} kHz "
+                 f"(la simulación muestrea a {scope.fs/1000:.0f} kS/s)")
+    if aviso_freq.cget("text") != texto:
+        aviso_freq.config(text=texto)
+    return resultado
+
+
 def update_generator_from_gui():
     global last_gen_state
+
+    f1, f2 = limitar_frecuencias()
 
     # -------------------------
     # CH1 – Portadora
@@ -333,7 +370,7 @@ def update_generator_from_gui():
     ch1 = (
         wave1.get(),
         safe_get(amp1, 0),
-        safe_get(freq1, 0),
+        f1,
         safe_get(phase1, 0),
         safe_get(duty1, 50),
         safe_get(offset1, 0),
@@ -345,7 +382,7 @@ def update_generator_from_gui():
     ch2 = (
         wave2.get(),
         safe_get(amp2, 0),
-        safe_get(freq2, 0),
+        f2,
         safe_get(phase2, 0),
         safe_get(duty2, 50),
         safe_get(offset2, 0),
@@ -406,7 +443,7 @@ def update_generator_from_gui():
         "type": mtype,
     }
 
-    if mtype in ("AM"):
+    if mtype == "AM":
         ch3_conf["mu"] = mu_val
 
     elif mtype == "FM":
@@ -604,6 +641,13 @@ btn_master_ac = tk.Button(
 )
 btn_master_ac.grid(row=3, column=5, sticky="nsew",padx=5, pady=5)
 
+btn_master_gnd = tk.Button(
+    frame_buttons,
+    text="GND MODE",
+    command=lambda: set_global_coupling("GND")
+)
+btn_master_gnd.grid(row=4, column=4, columnspan=2, sticky="nsew",padx=5, pady=5)
+
 
 
 # ==================================================
@@ -671,7 +715,10 @@ tk.Label(frame_signature, image=logo).pack(anchor="e")
 # ==================================================
 
 
+_siguiente_fotograma = time.perf_counter()
+
 def update():
+    global fft_legend, _siguiente_fotograma
     update_generator_from_gui()
 
     n = int(scope.fs * (REFRESH_MS / 1000))
@@ -718,12 +765,9 @@ def update():
             time_text=time_text,
             title_text=title_text
         )
+        tek_scope_blit(ax, canvas)
 
     elif frame["mode"] == "SPECTRUM":
-        ax.clear()
-        ax.set_facecolor("#0b0b0b")
-        ax.figure.patch.set_facecolor("#0b0b0b")
-
         freqs = frame["freqs"]
         mag = frame["mag_db"]
 
@@ -739,21 +783,64 @@ def update():
         freqs_view = freqs[mask]
         mag_view = mag[mask]
 
-        ax.plot(
-            freqs_view,
-            mag_view,
-            color=frame["color"],
-            linewidth=2
-        )
-
-        ax.set_xlim(f_min, f_max)
-
-        # ---- RESPUESTA EN FRECUENCIA DEL FILTRO ----
-        if (
+        mostrar_filtro = (
             filtro_ch3_var.get()
             and show_filter_resp_var.get()
             and frame["channel"] == "CH3"
-        ):
+        )
+
+        # ---- EJES DEL ESPECTRO ----
+        # Se construyen solo al entrar en el espectro o si cambia el canal o
+        # la curva del filtro; el resto de fotogramas solo cambian los datos.
+        spec = getattr(ax, "_spec", None)
+        if (spec is None or spec["linea"] not in ax.lines
+                or spec["clave"] != (frame["channel"], mostrar_filtro)):
+            # Los textos del modo tiempo no pintan nada sobre el espectro
+            for txt in ch_texts:
+                txt.remove()
+            ch_texts.clear()
+            time_text.set_text("")
+            title_text.set_text("")
+
+            ax.clear()
+            ax.set_facecolor("#0b0b0b")
+            ax.figure.patch.set_facecolor("#0b0b0b")
+
+            linea = ax.plot([], [], color=frame["color"], linewidth=2)[0]
+            linea_f = None
+            if mostrar_filtro:
+                linea_f = ax.plot([], [], linestyle="--", linewidth=2,
+                                  color="#00FF00", alpha=0.9, label="Filtro")[0]
+                ax.legend(loc="upper right")
+
+            ax.set_title(f"Spectrum {frame['channel']}", color="white")
+            ax.set_xlabel("Frecuencia (kHz)", color="white")
+            ax.set_ylabel("Nivel (dBV RMS)", color="white")
+
+            ax.xaxis.set_major_formatter(
+                lambda x, pos: f"{x/1000:.0f}"
+            )
+
+            ax.grid(True, color="#444")
+            ax.tick_params(colors="white")
+
+            # ax.clear() elimina la leyenda anterior: se crea de nuevo aquí
+            fft_legend = ax.text(
+                0.02, 0.95, "", transform=ax.transAxes,
+                va="top", ha="left", fontsize=12, color="white",
+                bbox=dict(facecolor="black", alpha=0.4, edgecolor="none")
+            )
+
+            spec = {"linea": linea, "linea_f": linea_f,
+                    "clave": (frame["channel"], mostrar_filtro)}
+            ax._spec = spec
+
+        spec["linea"].set_data(freqs_view, mag_view)
+        ax.set_xlim(f_min, f_max)
+        visibles = [mag_view]
+
+        # ---- RESPUESTA EN FRECUENCIA DEL FILTRO ----
+        if spec["linea_f"] is not None:
             freqs_f, mag_f = filter_frequency_response(
                 fs=scope.fs,
                 filter_type=filters.get(),
@@ -764,28 +851,17 @@ def update():
 
             if freqs_f is not None:
                 mask_f = (freqs_f >= f_min) & (freqs_f <= f_max)
+                spec["linea_f"].set_data(freqs_f[mask_f], mag_f[mask_f])
+                visibles.append(mag_f[mask_f])
+            else:
+                spec["linea_f"].set_data([], [])
 
-                ax.plot(
-                    freqs_f[mask_f],
-                    mag_f[mask_f],
-                    linestyle="--",
-                    linewidth=2,
-                    color="#00FF00",
-                    alpha=0.9,
-                    label="Filtro"
-                )
-                ax.legend(loc="upper right")
-
-        ax.set_title(f"Spectrum {frame['channel']}", color="white")
-        ax.set_xlabel("Frecuencia (kHz)", color="white")
-        ax.set_ylabel("Nivel (dBV RMS)", color="white")
-
-        ax.xaxis.set_major_formatter(
-            lambda x, pos: f"{x/1000:.0f}"
-        )
-
-        ax.grid(True, color="#444")
-        ax.tick_params(colors="white")
+        # Escala vertical como en un analizador: abajo el suelo de ruido y
+        # arriba el pico visible (señal o curva del filtro) redondeado a 10 dB
+        # con margen, para que la escala no baile en cada fotograma.
+        pico = max((float(np.max(v)) for v in visibles if len(v)), default=SPEC_SUELO_DB)
+        tope = max(np.ceil((pico + 10) / 10) * 10, SPEC_SUELO_DB + 20)
+        ax.set_ylim(SPEC_SUELO_DB - 5, tope)
 
         fft_legend.set_text(
             f"{frame['channel']}  Spectrum\n"
@@ -794,10 +870,22 @@ def update():
         )
         fft_legend.set_color(frame["color"])
         fft_legend.set_visible(True)
+        canvas.draw()
 
-    canvas.draw()
     update_spectrum_buttons()
-    root.after(REFRESH_MS, update)
+
+    # Ritmo fijo de REFRESH_MS contra una hora objetivo: el temporizador de Tk
+    # en Windows va a saltos de ~15,6 ms y pedir "espera 48 ms" da 62; con la
+    # hora objetivo ese redondeo se compensa en el fotograma siguiente.
+    # Si el PC no llega (más de un fotograma de retraso), no se intenta
+    # recuperar a ráfagas: se sigue desde ahora.
+    ahora = time.perf_counter()
+    _siguiente_fotograma += REFRESH_MS / 1000
+    if _siguiente_fotograma < ahora - REFRESH_MS / 1000:
+        _siguiente_fotograma = ahora
+    espera_ms = int((_siguiente_fotograma - ahora) * 1000)
+    # Mínimo 5 ms para que Tk atienda clics y teclado aunque el PC vaya justo.
+    root.after(max(5, espera_ms), update)
 
 
 update()

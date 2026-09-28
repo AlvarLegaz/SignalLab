@@ -1,7 +1,6 @@
 # gui_utils.py
 import sys
 import os
-import tkinter as tk
 
 
 def resource_path(relative_path):
@@ -11,5 +10,7 @@ def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
+        # La carpeta de este fichero, no la carpeta desde la que se lanza el
+        # programa: así 'python ruta/a/main.py' funciona desde cualquier sitio.
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)

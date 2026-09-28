@@ -3,6 +3,9 @@ echo ============================================
 echo   Generando ejecutable de SignalLab
 echo ============================================
 
+REM --- Trabajar siempre en la carpeta del script ---
+cd /d "%~dp0"
+
 REM --- Comprobar Python ---
 python --version >nul 2>&1
 IF ERRORLEVEL 1 (
@@ -17,6 +20,15 @@ IF ERRORLEVEL 1 (
     echo PyInstaller no esta instalado.
     echo Instalando PyInstaller...
     python -m pip install pyinstaller
+)
+
+REM --- Dependencias de la aplicacion ---
+echo Comprobando dependencias...
+python -m pip install -q -r requirements.txt
+IF ERRORLEVEL 1 (
+    echo ERROR: No se pudieron instalar las dependencias de requirements.txt
+    pause
+    exit /b 1
 )
 
 REM --- Limpiar builds anteriores ---

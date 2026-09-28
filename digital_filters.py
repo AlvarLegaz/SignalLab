@@ -1,5 +1,12 @@
 import numpy as np
-from scipy.signal import butter, sosfilt, sosfreqz
+from scipy.signal import butter, sosfilt, sosfilt_zi, sosfreqz
+
+# Estado del filtro entre bloques de 50 ms. Sin él, cada bloque arranca con el
+# filtro "vacío" y aparece un transitorio falso cada 50 ms. También se guardan
+# los coeficientes y la respuesta en frecuencia para no recalcularlos en cada
+# fotograma mientras no cambien los parámetros.
+_estado = {"clave": None, "sos": None, "zi": None}
+_respuesta = {"clave": None, "valor": (None, None)}
 
 
 def design_filter(filter_type, fs, freq, order=1, bandwidth=None):
@@ -54,17 +61,28 @@ def apply_filter(signal, fs, filter_type, freq, order=1, bandwidth=None):
         return signal
 
     try:
-        sos = design_filter(
-            filter_type=filter_type,
-            fs=fs,
-            freq=freq,
-            order=order,
-            bandwidth=bandwidth
-        )
-        return sosfilt(sos, signal)
+        clave = (filter_type, fs, freq, order, bandwidth)
+        if _estado["clave"] != clave:
+            sos = design_filter(
+                filter_type=filter_type,
+                fs=fs,
+                freq=freq,
+                order=order,
+                bandwidth=bandwidth
+            )
+            # Parámetros nuevos: se arranca en régimen permanente con el
+            # primer valor para no provocar un escalón al activar el filtro.
+            _estado.update(clave=clave, sos=sos, zi=sosfilt_zi(sos) * signal[0])
+
+        salida, _estado["zi"] = sosfilt(_estado["sos"], signal, zi=_estado["zi"])
+        _estado["error"] = None
+        return salida
 
     except Exception as e:
-        print(f"[Filtro] Error: {e}")
+        _estado["clave"] = None
+        if _estado.get("error") != str(e):   # avisar una vez, no 20 veces por segundo
+            _estado["error"] = str(e)
+            print(f"[Filtro] Error: {e}")
         return signal
 
 def filter_frequency_response(
@@ -75,6 +93,10 @@ def filter_frequency_response(
     """
 
     try:
+        clave = (filter_type, fs, freq, order, bandwidth, n_points)
+        if _respuesta["clave"] == clave:
+            return _respuesta["valor"]
+
         sos = design_filter(
             filter_type=filter_type,
             fs=fs,
@@ -88,6 +110,7 @@ def filter_frequency_response(
         mag[mag < 1e-12] = 1e-12
         mag_db = 20 * np.log10(mag)
 
+        _respuesta.update(clave=clave, valor=(w, mag_db))
         return w, mag_db
 
     except Exception as e:
